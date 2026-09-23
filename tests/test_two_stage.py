@@ -239,6 +239,14 @@ def test_stage2_failure_keeps_stage1(worker_env):
     assert "error" in json.loads(p.score_reason)["stage2"]
 
 
+def test_codex_incomplete_review_keeps_paper_pending(worker_env):
+    engine, _ = worker_env
+    llm = _mk_llm(s1_score=88, s2_score=None)
+    llm.config.backend = "codex-cli"
+    p = _run_score(engine, llm, _mk_paper())
+    assert p.status == "NEW" and p.score is None
+
+
 def test_cached_full_text_is_reused(worker_env):
     engine, pdf_mock = worker_env
     llm = _mk_llm(s1_score=80, s2_score=90)

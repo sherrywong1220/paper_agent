@@ -163,6 +163,10 @@ async def embed_papers(paper_ids: List[str], log=None) -> int:
 
 async def embed_new_papers(paper_ids: Optional[List[str]] = None, limit: Optional[int] = None, log=None) -> int:
     """Embed papers that have no current-model vector (optionally restricted to `paper_ids`)."""
+    if not settings.llm_api_key:
+        if log:
+            await log("Embeddings skipped: no API key configured. Title search, scoring and summaries remain available.")
+        return 0
     ids = missing_paper_ids(limit=limit, only_ids=paper_ids)
     if not ids:
         return 0

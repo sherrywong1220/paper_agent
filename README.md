@@ -148,6 +148,65 @@ curl -X POST http://localhost:8000/api/run
 
 ---
 
+## Codex CLI with subscription login (local use)
+
+Paper Agent can run scoring (both stages), affiliation extraction, summaries and reports
+through the official **Codex CLI**, using its saved ChatGPT subscription login. No LLM
+API key is required for these tasks. API mode remains the default and keeps its own model settings.
+
+1. Install a current Codex CLI on the **machine running the backend** and sign in there:
+
+   ```bash
+   codex login
+   codex login status
+   ```
+
+   Choose **Sign in with ChatGPT**. The integration requires the modern `codex exec`
+   flags `--ignore-user-config`, `--ignore-rules`, `--ephemeral`, and `--output-schema`
+   (developed with CLI 0.154.0).
+
+2. Set the following in `.env` (create `data/` for the default SQLite path):
+
+   ```dotenv
+   LLM_BACKEND="codex-cli"
+   CODEX_CLI_PATH="codex"
+   CODEX_MODEL=""
+   CODEX_TIMEOUT_SECONDS=300
+   OPENROUTER_API_KEY=""
+   OPENAI_API_KEY=""
+   SUMMARY_LANGUAGE="CN"
+   ENABLE_AUTO_UPDATE=false
+   ```
+
+3. Start the backend and frontend using the Quick Start commands. In **Settings → Models**,
+   click **Check login**, optionally select a Codex model by its CLI name, and set thresholds.
+   Leave the model blank to use Codex's built-in default. All reading tasks use this model;
+   switching back to API restores the API model slots. Switch backends in
+   **Configuration → LLM provider → LLM backend**. Start with **Add Paper** to try one paper.
+
+CLI calls run one at a time, in an empty temporary directory with a read-only sandbox and
+user configuration/tools disabled. Paper text goes through stdin, and structured results are
+read from a temporary output file. The integration uses Codex's own credential store;
+it does not copy credentials into `.env`, and never falls back to a paid API call.
+The backend user must have a ChatGPT login; a saved API-key login is rejected. Subscription
+usage limits still apply. Login/usage-limit failures pause CLI calls for five minutes;
+incomplete reviews remain pending and can be retried with **Fetch New** (or per-paper refresh).
+Timeouts terminate the CLI process. Token counts are recorded, but subscription dollar cost
+and remaining allowance are unavailable, so API cost estimates do not apply.
+
+**Embeddings are separate.** Codex CLI does not provide an embedding endpoint. With no API
+key, automatic embedding is skipped; title search, reading and reports work, while new
+semantic-search vectors are unavailable. To use embeddings, configure an API provider/key
+and compatible `EMBEDDING_MODEL`; those embedding requests are billed by that provider even
+while reading uses Codex. No local embedding model is included in this change.
+
+The stock Docker image does **not** include Codex or your host login. Use local deployment
+for this mode, or provision a compatible CLI and authenticate as the backend user inside
+your own container. A login on your laptop does not authenticate a separate server.
+
+Official references: [subscription authentication](https://learn.chatgpt.com/docs/auth),
+[non-interactive mode and structured output](https://learn.chatgpt.com/docs/non-interactive-mode).
+
 ## 🐳 Docker Deployment
 
 This project supports a **LinuxServer.io-style** single-container deployment.

@@ -1,8 +1,14 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from typing import List
+from typing import List, Literal
+from pydantic import Field
 
 class Settings(BaseSettings):
     DATABASE_URL: str = "sqlite:///data/paper_agent.db"
+
+    LLM_BACKEND: Literal["api", "codex-cli"] = "api"
+    CODEX_CLI_PATH: str = "codex"
+    CODEX_MODEL: str = Field(default="", pattern=r"^[A-Za-z0-9._-]*$")  # empty = CLI default
+    CODEX_TIMEOUT_SECONDS: int = Field(default=300, ge=10, le=1800)
 
     # ---- LLM provider (OpenRouter by default; any OpenAI-compatible endpoint works) ----
     # Preferred: OPENROUTER_API_KEY. Legacy OPENAI_API_KEY / OPENAI_BASE_URL are still honored
@@ -73,6 +79,8 @@ class Settings(BaseSettings):
 
     @property
     def llm_provider(self) -> str:
+        if self.LLM_BACKEND == "codex-cli":
+            return "codex-cli"
         return "openrouter" if self.OPENROUTER_API_KEY or "openrouter.ai" in (self.llm_base_url or "") else "openai-compatible"
 
 settings = Settings()

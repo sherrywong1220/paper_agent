@@ -31,6 +31,7 @@ from src.services.report_service import (
 from src.services.notifier import get_notifier
 from src.models import Report
 from src.services import embedding_service
+from src.services import codex_cli
 from src.services.paper_views import compact_paper
 from src.services import author_index as author_index_service
 
@@ -52,8 +53,11 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         await logger.log(f"Embedding index not loaded: {e}")
     try:
-        ok = await model_catalog.refresh()
-        await logger.log(f"Model catalog: {'loaded ' + str(model_catalog.status()['count']) + ' models' if ok else 'unavailable (' + str(model_catalog.status()['last_error']) + ')'}")
+        if settings.LLM_BACKEND == "codex-cli":
+            await logger.log("LLM backend: Codex CLI (subscription login). API model catalog is not needed.")
+        else:
+            ok = await model_catalog.refresh()
+            await logger.log(f"Model catalog: {'loaded ' + str(model_catalog.status()['count']) + ' models' if ok else 'unavailable (' + str(model_catalog.status()['last_error']) + ')'}")
     except Exception as e:
         await logger.log(f"Model catalog refresh failed: {e}")
     yield
@@ -721,6 +725,7 @@ class LLMSettingsUpdate(SQLModel):
     report_model: Optional[str] = None
     stage2_threshold: Optional[int] = None
     score_threshold: Optional[int] = None
+    codex_model: Optional[str] = None
 
 
 class SettingsUpdate(SQLModel):
@@ -742,6 +747,7 @@ def _llm_settings_payload(warnings: Optional[List[str]] = None):
         "thresholds": {"stage2_threshold": cfg.stage2_threshold, "score_threshold": cfg.score_threshold},
         "defaults": llm_defaults(),
         "summary_language": settings.SUMMARY_LANGUAGE,
+        "codex_model": settings.CODEX_MODEL,
         "catalog": model_catalog.status(),
         "warnings": warnings or [],
     }
@@ -798,6 +804,12 @@ def get_llm_settings():
     return _llm_settings_payload()
 
 
+@api.get("/llm/codex-status")
+async def get_codex_status():
+    """Check CLI installation and subscription login without running a model."""
+    return await codex_cli.status()
+
+
 @api.put("/settings/llm")
 async def put_model_settings(update: LLMSettingsUpdate):
     """
@@ -806,7 +818,8 @@ async def put_model_settings(update: LLMSettingsUpdate):
     """
     # Validate model ids against the catalog (only meaningful when the provider is OpenRouter,
     # whose ids match the catalog; legacy endpoints use their own ids)
-    await model_catalog.refresh()
+    if settings.LLM_BACKEND == "api":
+        await model_catalog.refresh()
     if settings.llm_provider == "openrouter" and model_catalog.status()["count"] > 0:
         for field in ("stage1_model", "stage2_model", "summary_model", "report_model"):
             mid = getattr(update, field)
@@ -820,6 +833,7 @@ async def put_model_settings(update: LLMSettingsUpdate):
             report_model=update.report_model,
             stage2_threshold=update.stage2_threshold,
             score_threshold=update.score_threshold,
+            codex_model=update.codex_model,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -839,6 +853,8 @@ async def list_models(
     refresh: bool = Query(False, description="Force refresh from provider"),
 ):
     """Provider model catalog with list prices (USD per 1M tokens)."""
+    if settings.LLM_BACKEND == "codex-cli":
+        return {"models": [], "catalog": {"count": 0, "source": "codex-cli", "last_error": None}}
     await model_catalog.refresh(force=refresh)
     items = [m.to_dict() for m in model_catalog.list(q=q, limit=limit)]
     return {"models": items, "catalog": model_catalog.status()}
@@ -864,7 +880,8 @@ async def get_llm_estimate(
     Projected cost per day / month for a model selection (defaults to the current settings).
     Uses observed average tokens per task and observed paper volumes when available.
     """
-    await model_catalog.refresh()
+    if settings.LLM_BACKEND == "api":
+        await model_catalog.refresh()
     cfg = get_llm_config()
     if stage1_model: cfg.stage1_model = stage1_model
     if stage2_model: cfg.stage2_model = stage2_model

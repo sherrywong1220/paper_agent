@@ -13,6 +13,7 @@ from src.services.settings_service import (
     TASK_STAGE1, TASK_STAGE2, TASK_SUMMARY, TASK_AFFILIATION, TASK_REPORT,
 )
 from src.services.model_catalog import model_catalog
+from src.services import codex_cli
 from src.utils import sanitize_text
 
 class ScoreResponse(BaseModel):
@@ -109,7 +110,7 @@ def _record_usage(task: str, model: str, paper_id: Optional[str], usage: Any,
                 except (TypeError, ValueError):
                     cost = None
         cost_estimated = False
-        if cost is None and (prompt_tokens or completion_tokens):
+        if cost is None and (prompt_tokens or completion_tokens) and not model.startswith("codex/"):
             est = model_catalog.estimate_cost(model, prompt_tokens, completion_tokens)
             if est is not None:
                 cost = est
@@ -134,7 +135,8 @@ class LLMService:
     Model per task comes from runtime settings (UI) with env defaults.
     """
     def __init__(self, config: Optional[LLMConfig] = None):
-        self.client = AsyncOpenAI(
+        self.config = config or get_llm_config()
+        self.client = None if self.config.backend == "codex-cli" else AsyncOpenAI(
             api_key=settings.llm_api_key or "missing-api-key",
             base_url=settings.llm_base_url,
             default_headers={
@@ -143,8 +145,7 @@ class LLMService:
                 "X-Title": "Paper Agent",
             },
         )
-        self.config = config or get_llm_config()
-        self.is_openrouter = "openrouter.ai" in (settings.llm_base_url or "")
+        self.is_openrouter = self.config.backend == "api" and "openrouter.ai" in (settings.llm_base_url or "")
         # Back-compat attribute (older code/tests referenced .model)
         self.model = self.config.stage1_model
 
@@ -172,6 +173,21 @@ class LLMService:
                     paper_id: Optional[str] = None, model: Optional[str] = None,
                     max_tokens: Optional[int] = None) -> Optional[str]:
         catalog_model = model or self.config.model_for_task(task)   # id as shown in Settings / catalog
+        if self.config.backend == "codex-cli":
+            t0 = time.monotonic()
+            cli_model = catalog_model.removeprefix("codex/")
+            try:
+                result = await codex_cli.generate(prompt, model="" if cli_model == "default" else cli_model,
+                                                  json_mode=json_mode)
+                _record_usage(task, catalog_model, paper_id, result.usage,
+                              int((time.monotonic() - t0) * 1000), True)
+                return result.text
+            except codex_cli.CodexCLIError as exc:
+                _record_usage(task, catalog_model, paper_id, None,
+                              int((time.monotonic() - t0) * 1000), False)
+                from src.logger import logger
+                await logger.log(f"Codex call failed ({task}, {paper_id}): {exc}")
+                return None
         model = self.resolve_model(catalog_model)                     # id the provider expects
         messages = [{"role": "user", "content": prompt}]
         base_kwargs: Dict[str, Any] = {"model": model, "messages": messages}

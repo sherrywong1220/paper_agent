@@ -76,6 +76,9 @@ async def process_paper_score(sem: asyncio.Semaphore, llm: LLMService, paper: Pa
                 details["stage2"] = {"model": cfg.stage2_model, "had_full_text": bool(text), **s2.model_dump()}
                 await logger.log(f"  - Stage 2 ({cfg.stage2_model}): {s2.score}")
             else:
+                if cfg.backend == "codex-cli":
+                    await logger.log(f"  - Codex stage-2 review incomplete for {paper.id}; leaving it pending for retry.")
+                    return
                 details["stage2"] = {"model": cfg.stage2_model, "error": "stage-2 scoring failed; kept stage-1 score"}
                 await logger.log(f"  - Stage 2 failed for {paper.id}; keeping stage-1 score {s1.score}")
 
@@ -171,26 +174,27 @@ async def run_worker():
     # 2000 for MVP; usually good enough
     fetched_papers = await asyncio.to_thread(fetcher.fetch_papers, max_results=PAPER_SYNC_LIMIT)
     new_papers = fetcher.filter_new_papers(fetched_papers)
+    # Saving commits and detaches the ORM objects; retain IDs before they expire.
+    new_paper_ids = [p.id for p in new_papers]
     fetcher.save_papers(new_papers)
 
     # 1b. Embed the new papers (semantic search / related / clustering). Non-fatal.
     if new_papers:
         try:
-            n = await embed_new_papers([p.id for p in new_papers], log=logger.log)
+            n = await embed_new_papers(new_paper_ids, log=logger.log)
             await logger.log(f"Embedded {n} new paper(s).")
         except Exception as e:
             await logger.log(f"Embedding skipped: {e}")
 
     notifier = get_notifier()
 
-    # Papers can sit as NEW without today's fetch producing anything: a backfill
-    # inserts them directly, and an earlier run may have died mid-scoring. Those
-    # still deserve a cycle, so only the genuinely idle case stops early.
+    # Resume both unscored papers and summaries interrupted by CLI limits/timeouts,
+    # even when today's fetch has no new papers.
     with Session(engine) as session:
-        pending_new = session.exec(select(Paper.id).where(Paper.status == "NEW")).first()
+        pending_work = session.exec(select(Paper.id).where(Paper.status.in_(["NEW", "SCORED"]))).first()
 
     # Nothing new and nothing pending — send rest-day notification (plus any weekly/monthly report that is due) and stop early
-    if not new_papers and not pending_new:
+    if not new_papers and not pending_work:
         await logger.log("No new papers retrieved.")
         reports = await run_scheduled_reports(run_started_at.date(), None, log=logger.log)
         if notifier:

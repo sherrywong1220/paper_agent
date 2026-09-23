@@ -89,6 +89,51 @@ def test_pending_new_is_scored_when_fetch_is_empty(monkeypatch):
     assert scored == ["2501.00001"]
 
 
+def test_pending_summary_resumes_when_fetch_is_empty(monkeypatch):
+    engine = _make_engine()
+    _insert(engine, "2501.00003", "SCORED")
+    scored, summarized = [], []
+    _base_patches(monkeypatch, engine, scored)
+    monkeypatch.setattr(worker, "get_notifier", lambda: None)
+
+    async def summarize(sem, llm, paper):
+        summarized.append(paper.id)
+
+    monkeypatch.setattr(worker, "process_paper_summary", summarize)
+    asyncio.run(worker.run_worker())
+    assert scored == [] and summarized == ["2501.00003"]
+
+
+def test_newly_saved_papers_are_passed_to_embedding(monkeypatch):
+    """A real commit expires fetched ORM objects before the embedding step."""
+    from src.services import arxiv
+
+    engine = _make_engine()
+    scored, embedded = [], []
+    _base_patches(monkeypatch, engine, scored)
+    paper = Paper(
+        id="2501.00004", title="LLM serving", authors="[]",
+        summary_generic="KV cache management", published_at=datetime(2026, 1, 1),
+        category_primary="cs.DC", all_categories='["cs.DC"]', pdf_url="",
+    )
+    monkeypatch.setattr(arxiv, "engine", engine)
+    monkeypatch.setattr(arxiv.ArxivFetcher, "fetch_papers", lambda self, **kw: [paper])
+    monkeypatch.setattr(worker, "ArxivFetcher", arxiv.ArxivFetcher)
+    monkeypatch.setattr(worker, "get_notifier", lambda: None)
+
+    async def embed(ids, **kwargs):
+        embedded.extend(ids)
+        with Session(engine) as session:
+            assert session.get(Paper, ids[0]).title == "LLM serving"
+        return len(ids)
+
+    monkeypatch.setattr(worker, "embed_new_papers", embed)
+    asyncio.run(worker.run_worker())
+
+    assert embedded == ["2501.00004"]
+    assert scored == ["2501.00004"]
+
+
 def test_rest_day_when_nothing_new_and_nothing_pending(monkeypatch):
     engine = _make_engine()
     _insert(engine, "2501.00002", "PUSHED")

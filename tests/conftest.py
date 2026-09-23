@@ -9,6 +9,16 @@ from src.database import get_session
 # (though here mostly single thread)
 TEST_DATABASE_URL = "sqlite:///:memory:"
 
+
+@pytest.fixture(autouse=True)
+def default_test_backend(monkeypatch):
+    """Existing tests target API mode regardless of the developer's local .env.
+
+    Codex tests explicitly select CLI mode and use a fake executable.
+    """
+    from src.config import settings
+    monkeypatch.setattr(settings, "LLM_BACKEND", "api")
+
 @pytest.fixture(name="session")
 def session_fixture():
     engine = create_engine(

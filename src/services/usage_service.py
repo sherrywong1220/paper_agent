@@ -46,8 +46,8 @@ def _engine():
 
 def cost_since(since: datetime, session: Optional[Session] = None) -> Optional[float]:
     def _q(s: Session):
-        total = s.exec(select(func.coalesce(func.sum(LLMUsage.cost), 0.0)).where(LLMUsage.created_at >= since)).one()
-        return float(total or 0.0)
+        total = s.exec(select(func.sum(LLMUsage.cost)).where(LLMUsage.created_at >= since)).one()
+        return float(total) if total is not None else None
     try:
         if session is not None:
             return _q(session)
@@ -63,11 +63,14 @@ def _period_totals(s: Session, since: Optional[datetime]) -> Dict[str, Any]:
         func.coalesce(func.sum(LLMUsage.prompt_tokens), 0),
         func.coalesce(func.sum(LLMUsage.completion_tokens), 0),
         func.coalesce(func.sum(LLMUsage.cost), 0.0),
+        func.count(LLMUsage.cost),
     )
     if since is not None:
         q = q.where(LLMUsage.created_at >= since)
-    calls, p, c, cost = s.exec(q).one()
-    return {"calls": int(calls or 0), "prompt_tokens": int(p or 0), "completion_tokens": int(c or 0), "cost": float(cost or 0.0)}
+    calls, p, c, cost, priced_calls = s.exec(q).one()
+    return {"calls": int(calls or 0), "prompt_tokens": int(p or 0), "completion_tokens": int(c or 0),
+            "cost": None if calls and not priced_calls else float(cost or 0.0),
+            "unpriced_calls": int(calls - priced_calls)}
 
 
 def usage_summary(session: Session, breakdown_days: int = 30) -> Dict[str, Any]:
@@ -88,29 +91,31 @@ def usage_summary(session: Session, breakdown_days: int = 30) -> Dict[str, Any]:
             func.coalesce(func.sum(LLMUsage.completion_tokens), 0),
             func.coalesce(func.sum(LLMUsage.cost), 0.0),
             func.sum(LLMUsage.cost_estimated),
+            func.count(LLMUsage.cost),
         ).where(LLMUsage.created_at >= since).group_by(LLMUsage.task, LLMUsage.model)
     ).all()
     breakdown = []
-    for task, model, calls, p, c, cost, est in rows:
+    for task, model, calls, p, c, cost, est, priced_calls in rows:
         calls = int(calls or 0)
         breakdown.append({
             "task": task, "model": model, "calls": calls,
             "prompt_tokens": int(p or 0), "completion_tokens": int(c or 0),
             "avg_prompt_tokens": round((p or 0) / calls) if calls else 0,
             "avg_completion_tokens": round((c or 0) / calls) if calls else 0,
-            "cost": float(cost or 0.0),
-            "cost_per_call": (float(cost or 0.0) / calls) if calls else 0.0,
+            "cost": float(cost or 0.0) if priced_calls else None,
+            "cost_per_call": (float(cost or 0.0) / priced_calls) if priced_calls else None,
+            "unpriced_calls": calls - priced_calls,
             "estimated_rows": int(est or 0),
         })
-    breakdown.sort(key=lambda r: -r["cost"])
+    breakdown.sort(key=lambda r: -(r["cost"] or 0))
     # Daily series for the last N days (for a small sparkline / table)
     daily_rows = session.exec(
-        select(func.date(LLMUsage.created_at), func.count(LLMUsage.id), func.coalesce(func.sum(LLMUsage.cost), 0.0))
+        select(func.date(LLMUsage.created_at), func.count(LLMUsage.id), func.sum(LLMUsage.cost))
         .where(LLMUsage.created_at >= since)
         .group_by(func.date(LLMUsage.created_at))
         .order_by(func.date(LLMUsage.created_at))
     ).all()
-    daily = [{"date": str(d), "calls": int(n or 0), "cost": float(c or 0.0)} for d, n, c in daily_rows]
+    daily = [{"date": str(d), "calls": int(n or 0), "cost": float(c) if c is not None else None} for d, n, c in daily_rows]
     return {"periods": periods, "breakdown_days": breakdown_days, "breakdown": breakdown, "daily": daily}
 
 
@@ -175,6 +180,11 @@ def _daily_volumes(session: Session, cfg: LLMConfig, days: int = 14) -> Dict[str
 
 def estimate(session: Session, cfg: LLMConfig) -> Dict[str, Any]:
     """Project cost for the given model selection."""
+    if cfg.backend == "codex-cli":
+        return {"available": False, "config": cfg.to_dict(), "per_task": [],
+                "total_per_day": None, "total_per_month": None,
+                "message": "Codex uses your subscription allowance. API dollar estimates do not apply. "
+                           "Optional embedding API calls are billed separately."}
     tokens = _avg_tokens_per_task(session)
     volumes = _daily_volumes(session, cfg)
     per_task: List[Dict[str, Any]] = []
@@ -205,6 +215,7 @@ def estimate(session: Session, cfg: LLMConfig) -> Dict[str, Any]:
             "cost_per_call": cost_per_call, "cost_per_day": cost_per_day,
         })
     return {
+        "available": True,
         "config": cfg.to_dict(),
         "per_task": per_task,
         "total_per_day": total_per_day,

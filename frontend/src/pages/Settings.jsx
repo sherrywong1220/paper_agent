@@ -121,7 +121,19 @@ export default function Settings() {
     const [catalogStatus, setCatalogStatus] = useState(null);
 
     // editable draft
-    const [draft, setDraft] = useState({ stage1: '', stage2: '', summary: '', report: '', stage2_threshold: 60, score_threshold: 85 });
+    const [draft, setDraft] = useState({ stage1: '', stage2: '', summary: '', report: '', codex_model: '', stage2_threshold: 60, score_threshold: 85 });
+    const isCodex = settings?.provider?.name === 'codex-cli';
+    const [codexStatus, setCodexStatus] = useState(null);
+    const [checkingCodex, setCheckingCodex] = useState(false);
+    const checkCodex = useCallback(async () => {
+        setCheckingCodex(true);
+        try {
+            const res = await axios.get(`${API_URL}/llm/codex-status`);
+            setCodexStatus(res.data);
+        } catch (e) {
+            setCodexStatus({ message: e.response?.data?.detail || 'Could not check Codex CLI.' });
+        } finally { setCheckingCodex(false); }
+    }, []);
     const [saving, setSaving] = useState(false);
     const [saveMsg, setSaveMsg] = useState(null); // {type:'ok'|'err', text}
 
@@ -171,7 +183,6 @@ export default function Settings() {
     }, []);
 
     const loadAll = useCallback(async () => {
-        setLoading(true);
         try {
             const [sRes, mRes] = await Promise.all([
                 axios.get(`${API_URL}/settings/llm`),
@@ -183,22 +194,23 @@ export default function Settings() {
                 stage2: sRes.data.models.stage2,
                 summary: sRes.data.models.summary,
                 report: sRes.data.models.report,
+                codex_model: sRes.data.codex_model || '',
                 stage2_threshold: sRes.data.thresholds.stage2_threshold,
                 score_threshold: sRes.data.thresholds.score_threshold,
             });
             setModels(mRes.data.models || []);
             setCatalogStatus(mRes.data.catalog || null);
             setProfileDraft(sRes.data.profile || '');
+            if (sRes.data.provider?.name === 'codex-cli') checkCodex();
         } catch (e) {
             console.error('Failed to load settings', e);
             setSaveMsg({ type: 'err', text: 'Failed to load settings. Check backend logs.' });
         } finally {
             setLoading(false);
         }
-    }, []);
+    }, [checkCodex]);
 
     const loadUsage = useCallback(async () => {
-        setUsageLoading(true);
         try {
             const res = await axios.get(`${API_URL}/llm/usage`, { params: { days: 30 } });
             setUsage(res.data);
@@ -209,7 +221,13 @@ export default function Settings() {
         }
     }, []);
 
-    useEffect(() => { loadAll(); loadUsage(); loadAllSettings(); loadEmb(); }, [loadAll, loadUsage, loadAllSettings, loadEmb]);
+    useEffect(() => {
+        let active = true;
+        Promise.resolve().then(() => {
+            if (active) { loadAll(); loadUsage(); loadAllSettings(); loadEmb(); }
+        });
+        return () => { active = false; };
+    }, [loadAll, loadUsage, loadAllSettings, loadEmb]);
 
     // Debounced cost estimate whenever the draft changes
     useEffect(() => {
@@ -231,13 +249,14 @@ export default function Settings() {
             }
         }, 350);
         return () => clearTimeout(t);
-    }, [draft]);
+    }, [draft, isCodex]);
 
     const dirty = settings && (
+        (isCodex ? draft.codex_model !== (settings.codex_model || '') : (
         draft.stage1 !== settings.models.stage1 ||
         draft.stage2 !== settings.models.stage2 ||
         draft.summary !== settings.models.summary ||
-        draft.report !== settings.models.report ||
+        draft.report !== settings.models.report)) ||
         Number(draft.stage2_threshold) !== settings.thresholds.stage2_threshold ||
         Number(draft.score_threshold) !== settings.thresholds.score_threshold
     );
@@ -246,10 +265,15 @@ export default function Settings() {
         setSaving(true); setSaveMsg(null);
         try {
             const res = await axios.put(`${API_URL}/settings/llm`, {
-                stage1_model: draft.stage1, stage2_model: draft.stage2, summary_model: draft.summary, report_model: draft.report,
+                ...(isCodex ? { codex_model: draft.codex_model } : {
+                    stage1_model: draft.stage1, stage2_model: draft.stage2, summary_model: draft.summary, report_model: draft.report,
+                }),
                 stage2_threshold: Number(draft.stage2_threshold), score_threshold: Number(draft.score_threshold),
             });
             setSettings(res.data);
+            setDraft(d => ({ ...d, codex_model: res.data.codex_model || '',
+                stage1: res.data.models.stage1, stage2: res.data.models.stage2,
+                summary: res.data.models.summary, report: res.data.models.report }));
             setSaveWarnings(res.data.warnings || []);
             setSaveMsg({ type: 'ok', text: `Saved to ${res.data.env_file?.path || 'the env file'}. The next run will use these models.` });
             loadAllSettings();
@@ -264,6 +288,7 @@ export default function Settings() {
         if (!settings) return;
         setDraft({
             stage1: settings.defaults.stage1, stage2: settings.defaults.stage2, summary: settings.defaults.summary, report: settings.defaults.report,
+            codex_model: '',
             stage2_threshold: settings.defaults.stage2_threshold, score_threshold: settings.defaults.score_threshold,
         });
     };
@@ -281,6 +306,7 @@ export default function Settings() {
             setCfgMsg({ type: 'ok', text: keys.length ? `Saved ${keys.join(', ')} to ${res.data.env_file?.path}.` : 'Nothing to save.' });
             // provider / thresholds may have changed -> refresh the models card too
             loadAll();
+            loadEmb();
         } catch (e) {
             setCfgMsg({ type: 'err', text: e.response?.data?.detail || 'Failed to save configuration' });
         } finally {
@@ -310,16 +336,6 @@ export default function Settings() {
         } catch (e) { console.error(e); }
     };
 
-    const Card = ({ icon: Icon, title, children, right }) => (
-        <section className="bg-slate-800 rounded-2xl border border-slate-700 shadow-xl overflow-hidden mb-8">
-            <div className="flex items-center justify-between px-6 md:px-8 pt-6">
-                <h3 className="flex items-center gap-2 text-xl font-bold text-slate-200"><Icon size={20} className="text-cyan-400" /> {title}</h3>
-                {right}
-            </div>
-            <div className="p-6 md:p-8 pt-4">{children}</div>
-        </section>
-    );
-
     return (
         <div className="min-h-screen bg-[#0f172a] text-slate-200 p-6 md:p-12 font-sans selection:bg-cyan-500/30">
             <div className="max-w-4xl mx-auto">
@@ -348,23 +364,36 @@ export default function Settings() {
                                     <span>
                                         Provider: <span className="font-mono text-slate-200">{settings?.provider?.name}</span>
                                         {' · '}
-                                        {settings?.provider?.key_configured
+                                        {isCodex ? <span className="text-cyan-400">subscription login</span> : settings?.provider?.key_configured
                                             ? <span className="text-green-400">API key configured</span>
                                             : <span className="text-red-400">no API key</span>}
                                     </span>
-                                    <button onClick={refreshCatalog} className="flex items-center gap-1 px-2 py-1 rounded bg-slate-700/60 hover:bg-slate-600 text-slate-300" title={`Catalog: ${catalogStatus?.count || 0} models${catalogStatus?.last_error ? ` · error: ${catalogStatus.last_error}` : ''}`}>
+                                    {!isCodex && <button onClick={refreshCatalog} className="flex items-center gap-1 px-2 py-1 rounded bg-slate-700/60 hover:bg-slate-600 text-slate-300" title={`Catalog: ${catalogStatus?.count || 0} models${catalogStatus?.last_error ? ` · error: ${catalogStatus.last_error}` : ''}`}>
                                         <RefreshCw size={12} /> {catalogStatus?.count || 0} models
-                                    </button>
+                                    </button>}
                                 </div>
                             }
                         >
-                            {!models.length && (
+                            <p className="text-xs text-slate-400 mb-5">Choose API or Codex CLI in Configuration → LLM provider below.</p>
+                            {!isCodex && !models.length && (
                                 <div className="flex items-start gap-2 text-sm text-yellow-300 bg-yellow-500/10 border border-yellow-500/30 rounded-lg p-3 mb-5">
                                     <AlertTriangle size={16} className="mt-0.5 shrink-0" />
                                     <span>Model catalog unavailable ({catalogStatus?.last_error || 'not loaded'}). You can still type model ids, but prices and validation are disabled.</span>
                                 </div>
                             )}
-                            {models.length ? (
+                            {isCodex ? (
+                                <div className="mb-6">
+                                    <label htmlFor="codex-model" className="text-sm font-bold text-slate-200 block mb-1">Codex model</label>
+                                    <p className="text-xs text-slate-400 mb-2">Used for screening, review, summaries and reports. Leave blank to use the Codex default model.</p>
+                                    <input id="codex-model" value={draft.codex_model} onChange={e => setDraft(d => ({ ...d, codex_model: e.target.value }))} placeholder="Codex default" className="w-full bg-slate-900 border border-slate-700 rounded-lg px-4 py-2.5 font-mono text-sm text-slate-200 focus:outline-none focus:border-cyan-500" />
+                                    <div className="mt-3 flex items-center gap-3 text-sm">
+                                        <span className={codexStatus?.subscription_login ? 'text-green-400' : 'text-yellow-300'}>{checkingCodex ? 'Checking Codex login…' : codexStatus?.message}</span>
+                                        <button onClick={checkCodex} disabled={checkingCodex} className="shrink-0 text-xs px-2 py-1 rounded bg-slate-700 hover:bg-slate-600">Check login</button>
+                                    </div>
+                                    {codexStatus?.paused_seconds > 0 && <p className="text-xs text-yellow-300 mt-2">Calls paused for about {codexStatus.paused_seconds}s after a login or usage-limit error.</p>}
+                                    <p className="text-xs text-slate-500 mt-2">Login belongs to the machine running the backend. CLI calls run one at a time and use your subscription allowance.</p>
+                                </div>
+                            ) : models.length ? (
                                 <>
                                     <ModelSelect label="Stage 1 · Screening" hint={TASK_META.score_stage1.hint} value={draft.stage1} onChange={v => setDraft(d => ({ ...d, stage1: v }))} models={models} />
                                     <ModelSelect label="Stage 2 · Review" hint={TASK_META.score_stage2.hint} value={draft.stage2} onChange={v => setDraft(d => ({ ...d, stage2: v }))} models={models} />
@@ -414,7 +443,9 @@ export default function Settings() {
                         <Card icon={DollarSign} title="Estimated cost"
                             right={<span className="text-xs text-slate-500 flex items-center gap-1">{estimating && <RefreshCw size={12} className="animate-spin" />} for the selection above</span>}
                         >
-                            {estimate ? (
+                            {estimate?.available === false ? (
+                                <p className="text-sm text-slate-400">{estimate.message}</p>
+                            ) : estimate ? (
                                 <>
                                     <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
                                         <Stat label="per day" value={fmtUSD(estimate.total_per_day, 3)} accent />
@@ -451,14 +482,15 @@ export default function Settings() {
                         </Card>
 
                         {/* Actual usage */}
-                        <Card icon={Activity} title="Actual LLM spend"
-                            right={<button onClick={loadUsage} className="flex items-center gap-1 text-xs px-2 py-1 rounded bg-slate-700/60 hover:bg-slate-600 text-slate-300"><RefreshCw size={12} className={usageLoading ? 'animate-spin' : ''} /> refresh</button>}
+                        <Card icon={Activity} title="LLM usage & API spend"
+                            right={<button onClick={() => { setUsageLoading(true); loadUsage(); }} className="flex items-center gap-1 text-xs px-2 py-1 rounded bg-slate-700/60 hover:bg-slate-600 text-slate-300"><RefreshCw size={12} className={usageLoading ? 'animate-spin' : ''} /> refresh</button>}
                         >
                             {usage ? (
                                 <>
+                                    <p className="text-xs text-slate-400 mb-4">Dollar amounts cover calls with reported or estimated API costs. Codex calls track tokens; their subscription cost and remaining allowance are not reported here.</p>
                                     <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
                                         {[['today', 'Today'], ['last_7d', 'Last 7 days'], ['last_30d', 'Last 30 days'], ['all_time', 'All time']].map(([k, label]) => (
-                                            <Stat key={k} label={label} value={fmtUSD(usage.periods[k].cost, 3)} sub={`${fmtNum(usage.periods[k].calls)} calls · ${fmtNum(usage.periods[k].prompt_tokens + usage.periods[k].completion_tokens)} tok`} />
+                                            <Stat key={k} label={label} value={fmtUSD(usage.periods[k].cost, 3)} sub={`${fmtNum(usage.periods[k].calls)} calls · ${fmtNum(usage.periods[k].prompt_tokens + usage.periods[k].completion_tokens)} tok${usage.periods[k].unpriced_calls ? ` · ${usage.periods[k].unpriced_calls} unpriced` : ''}`} />
                                         ))}
                                     </div>
                                     {usage.breakdown.length ? (
@@ -560,11 +592,11 @@ export default function Settings() {
                                         <Stat label="index in memory" value={fmtNum(embStatus.index_size)} sub={embStatus.index_loaded_at ? new Date(embStatus.index_loaded_at).toLocaleTimeString() : null} />
                                     </div>
                                     <div className="flex items-center gap-3">
-                                        <button onClick={startBackfill} disabled={embBusy || embStatus.backfill?.running || !embStatus.missing} className={`flex items-center gap-2 px-4 py-2 rounded-lg font-bold transition-colors ${embBusy || embStatus.backfill?.running || !embStatus.missing ? 'bg-slate-700 text-slate-500 cursor-not-allowed' : 'bg-cyan-500 hover:bg-cyan-400 text-slate-900'}`}>
+                                        <button onClick={startBackfill} disabled={embBusy || embStatus.backfill?.running || !embStatus.missing || !embStatus.key_configured} className={`flex items-center gap-2 px-4 py-2 rounded-lg font-bold transition-colors ${embBusy || embStatus.backfill?.running || !embStatus.missing || !embStatus.key_configured ? 'bg-slate-700 text-slate-500 cursor-not-allowed' : 'bg-cyan-500 hover:bg-cyan-400 text-slate-900'}`}>
                                             <RefreshCw size={16} className={embStatus.backfill?.running ? 'animate-spin' : ''} /> {embStatus.backfill?.running ? `Backfilling ${fmtNum(embStatus.backfill.done)} / ${fmtNum(embStatus.backfill.total)}…` : (embStatus.missing ? `Backfill ${fmtNum(embStatus.missing)} papers` : 'All papers embedded')}
                                         </button>
                                         {embStatus.backfill?.error && <span className="text-sm text-red-400">{embStatus.backfill.error}</span>}
-                                        {!embStatus.key_configured && <span className="text-sm text-red-400">No API key configured.</span>}
+                                        {!embStatus.key_configured && <span className="text-sm text-slate-400">Embeddings need a separate API key. Title search and Codex reading remain available.</span>}
                                     </div>
                                 </>
                             )}
@@ -602,6 +634,7 @@ export default function Settings() {
 
 const CONFIG_GROUPS = [
     { key: 'provider', label: 'LLM provider', icon: KeyRound },
+    { key: 'codex', label: 'Codex CLI', icon: Cpu },
     { key: 'pipeline', label: 'Pipeline', icon: Cpu },
     { key: 'schedule', label: 'Schedule', icon: Clock },
     { key: 'reports', label: 'Reports', icon: Activity },
@@ -609,6 +642,19 @@ const CONFIG_GROUPS = [
     { key: 'notification', label: 'Notification', icon: Bell },
     { key: 'system', label: 'System (read-only)', icon: Database },
 ];
+
+function Card({ icon, title, children, right }) {
+    const Icon = icon;
+    return (
+        <section className="bg-slate-800 rounded-2xl border border-slate-700 shadow-xl overflow-hidden mb-8">
+            <div className="flex items-center justify-between px-6 md:px-8 pt-6">
+                <h3 className="flex items-center gap-2 text-xl font-bold text-slate-200"><Icon size={20} className="text-cyan-400" /> {title}</h3>
+                {right}
+            </div>
+            <div className="p-6 md:p-8 pt-4">{children}</div>
+        </section>
+    );
+}
 
 function SourceBadge({ field }) {
     if (field.source === 'env') return <span className="text-[10px] px-1.5 py-0.5 rounded bg-yellow-500/15 text-yellow-300 border border-yellow-500/30" title={`Overridden by process environment variable ${field.env_var}`}>env var</span>;

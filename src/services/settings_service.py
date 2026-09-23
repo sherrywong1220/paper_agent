@@ -54,6 +54,15 @@ SCHEMA: List[Field] = [
     Field("OPENAI_API_KEY", "provider", "secret", "OpenAI API key (legacy fallback)",
           "Used only when OPENROUTER_API_KEY is empty."),
     Field("OPENAI_BASE_URL", "provider", "str", "OpenAI base URL (legacy fallback)", "", pattern=r"^https?://.+"),
+    Field("LLM_BACKEND", "provider", "enum", "LLM backend",
+          "Use an API provider or the server's Codex CLI subscription login.", options=["api", "codex-cli"]),
+    Field("CODEX_CLI_PATH", "codex", "str", "Codex executable",
+          "Executable name on PATH or an absolute path on the backend machine."),
+    Field("CODEX_MODEL", "models", "str", "Codex model",
+          "Blank uses Codex's default. Used for all reading tasks in CLI mode.",
+          pattern=r"^[A-Za-z0-9._-]*$", owner="models"),
+    Field("CODEX_TIMEOUT_SECONDS", "codex", "int", "Codex timeout (seconds)",
+          "Maximum duration of each call. CLI calls run one at a time.", min=10, max=1800),
     # Models / thresholds (owned by the Models card)
     Field("LLM_MODEL_STAGE1", "models", "str", "Stage 1 model", "", owner="models"),
     Field("LLM_MODEL_STAGE2", "models", "str", "Stage 2 model", "", owner="models"),
@@ -144,6 +153,8 @@ def _coerce(field: Field, raw: Any) -> Any:
     v = "" if raw is None else str(raw)
     if field.type != "text":
         v = v.strip()
+    if field.key == "CODEX_CLI_PATH" and not v:
+        raise ValueError("CODEX_CLI_PATH must not be empty")
     if field.pattern and v and not re.match(field.pattern, v):
         raise ValueError(f"{field.key} has an invalid format")
     return v
@@ -201,8 +212,9 @@ def describe_settings() -> Dict[str, Any]:
         "fields": fields,
         "provider": {
             "name": settings.llm_provider,
-            "base_url": settings.llm_base_url,
+            "base_url": None if settings.LLM_BACKEND == "codex-cli" else settings.llm_base_url,
             "key_configured": bool(settings.llm_api_key),
+            "requires_api_key": settings.LLM_BACKEND == "api",
         },
     }
 
@@ -256,6 +268,7 @@ class LLMConfig:
     stage2_threshold: int
     score_threshold: int
     report_model: str = "anthropic/claude-sonnet-5"
+    backend: str = "api"
 
     def model_for_task(self, task: str) -> str:
         if task == TASK_STAGE2:
@@ -274,6 +287,10 @@ class LLMConfig:
 
 
 def get_llm_config() -> LLMConfig:
+    if settings.LLM_BACKEND == "codex-cli":
+        model = "codex/" + (settings.CODEX_MODEL.strip() or "default")
+        return LLMConfig(model, model, model, int(settings.STAGE2_THRESHOLD),
+                         int(settings.SCORE_THRESHOLD), report_model=model, backend="codex-cli")
     return LLMConfig(
         stage1_model=settings.LLM_MODEL_STAGE1,
         stage2_model=settings.LLM_MODEL_STAGE2,
@@ -291,8 +308,11 @@ def update_llm_config(
     stage2_threshold: Optional[int] = None,
     score_threshold: Optional[int] = None,
     report_model: Optional[str] = None,
+    codex_model: Optional[str] = None,
 ) -> Tuple[LLMConfig, List[str]]:
     values: Dict[str, Any] = {}
+    if codex_model is not None:
+        values["CODEX_MODEL"] = codex_model
     if stage1_model:
         values["LLM_MODEL_STAGE1"] = stage1_model
     if report_model:
